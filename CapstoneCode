@@ -1,0 +1,807 @@
+#Final Capstone
+
+#Libraries
+library(dplyr)
+library(tidyverse)
+library(stargazer)
+library(ggplot2)
+library(tseries)
+library(corrplot)
+library(tree)
+library(caret)
+library(forecast)
+library(glmnet)
+#Data Prep
+#---------
+#Loading in lists of data sets for each year
+dat_list<-list.files(pattern="\\d\\d\\d\\d_full\\.csv")
+dat_list
+stud_list<-list.files(pattern="\\d\\d\\d\\d_student\\.csv")
+stud_list
+dat<-list()
+stud<-list()
+for(i in 1:length(dat_list)){
+  dat[[i]]<-read.csv(dat_list[i],header=TRUE)
+}
+for(i in 1:length(stud_list)){
+  stud[[i]]<-read.csv(stud_list[i],header=TRUE)
+}
+#Combining dfs in lists by rows
+full_dat<-bind_rows(dat[[1]],dat[[2]],dat[[3]],dat[[4]],dat[[5]],dat[[6]],dat[[7]],
+                    dat[[8]],dat[[9]],dat[[10]],dat[[11]],dat[[12]],dat[[13]],dat[[14]],
+                    dat[[15]],dat[[16]],dat[[17]])
+summary(full_dat)
+names(full_dat)
+full_stud<-bind_rows(stud[[1]],stud[[2]],stud[[3]],stud[[4]],stud[[5]],stud[[6]],stud[[7]],
+                     stud[[8]],stud[[9]],stud[[10]],stud[[11]],stud[[12]],stud[[13]],stud[[14]],
+                     stud[[15]],stud[[16]],stud[[17]])
+names(full_stud)
+#selecting only measures for all students and removing unneeded columns
+full_stud<-full_stud[full_stud$level=="All students total",]
+head(full_stud)
+full_stud<-full_stud[,-14:-37]
+full_stud<-full_stud[,-4]
+#fill NA values in columns to be summed with 0
+full_dat$exec_admin_FTE_staff[is.na(full_dat$exec_admin_FTE_staff)]<-0
+full_dat$other_pro_FTE_staff[is.na(full_dat$other_pro_FTE_staff)]<-0
+full_dat$nonpro_FTE_staff[is.na(full_dat$nonpro_FTE_staff)]<-0
+full_dat$support_staff[is.na(full_dat$support_staff)]<-0
+full_dat$service_staff[is.na(full_dat$service_staff)]<-0
+
+#add columns to create other staff variable
+full_dat$other_staff<-full_dat$exec_admin_FTE_staff+full_dat$other_pro_FTE_staff+
+  full_dat$nonpro_FTE_staff+full_dat$support_staff+full_dat$service_staff
+summary(full_dat$other_staff)
+#creating a single column for educational staff
+full_dat$educational_FTE_staff[is.na(full_dat$educational_FTE_staff)]<-0
+full_dat$educational_staff[is.na(full_dat$educational_staff)]<-0
+full_dat$education_staff<-full_dat$educational_FTE_staff+full_dat$educational_staff
+#removing old columns
+full_dat<-full_dat[,-10]
+full_dat<-full_dat[,-31]
+full_dat<-full_dat[,-10:-12]
+full_dat<-full_dat[,-28:-29]
+#rearranging columns
+dummy<-full_dat[5]
+full_dat[5]<-full_dat[7]
+full_dat[7]<-dummy
+colnames(full_dat)[5]<-"tot_cohort_grad"
+colnames(full_dat)[7]<-"institution_size"
+head(full_dat)
+#merging data sets
+full<-merge(full_dat,full_stud,by=c("unitid","institution.name","year"))
+names(full)
+str(full)
+#removing unitid
+full<-full[,-1]
+#changing character types to factor
+full[,1]<-as.factor(full[,1])
+full[,6]<-as.factor(full[,6])
+full[,15]<-as.factor(full[,15])
+full[,16]<-as.factor(full[,16])
+full[,17]<-as.factor(full[,17])
+full[,18]<-as.factor(full[,18])
+#Add variable for recession during year (1-true/0-false)
+#Years that will be true are 2007-2009 and 2020
+str(full)
+names(full)
+full$recession<-full$year
+full$recession[full$year %in% c(2007,2008,2009,2020)]<-1
+full$recession[!(full$year %in% c(2007,2008,2009,2020))]<-0
+full$recession<-as.factor(full$recession)
+#rearranging columns, to keep recession var out of demographic group
+dummy<-full[32]
+full[32]<-full[41]
+full[41]<-dummy
+colnames(full)[32]<-"recession"
+colnames(full)[41]<-"males"
+#data set contains NAs. certain models may perform with these, some may not
+#Creating alternate NA-removed sets for later analysis
+dim(full)
+#reduced by removing columns with na
+complete_col<-full[ , colSums(is.na(full))==0]
+dim(complete_col)
+names(complete_col)
+#reduced by removing rows with na
+complete_row<-full[rowSums(is.na(full))==0 ,]
+dim(complete_row)
+summary(complete_row)
+#row reduced data set vastly changes the time series, leaving out several years
+#is not considered for analysis
+#Creating list of df for each college
+df_list <- split( full , f = full$institution.name )
+df_list$`Lock Haven University`
+#removing columns with all same values
+for(i in 1:length(df_list)){
+  temp<-df_list[[i]]
+  temp<-temp[sapply(temp,function(x) !is.factor(x)|length(unique(x))>1)]
+  df_list[[i]]<-temp
+}
+#Descriptive Analysis
+#---------
+#summary statistics on response variables
+summary(full)
+response <- c('tot_enroll','tot_cohort_grad','ft_retention')
+stargazer(
+  full[, response], type = "text", 
+  summary.stat = c("min", "p25", "median", "p75", "max", "median", "sd")
+)
+
+#summary statistics on data by group
+for(i in 1:length(df_list)){
+  print(names(df_list[i]))
+  stargazer(
+    df_list[[i]][response], type = "text", 
+    summary.stat = c("min", "p25", "median", "p75", "max", "mean", "sd")
+  )
+}
+#Enrollment observations
+#Cheyney is observed to have dramatically lower enrollment
+#Slippery Rock shows the least deviation in enrollment
+#West Chester and IUP have the highest enrollment
+#Graduation observations
+#Cheyney shows lowest graduation 
+#Kutztown shows the least deviation in graduation
+#West Chester, Millersville, and Bloomsburg have highest graduation
+#Retention observations
+#Cheyney shows lowest retention
+#West Chester shows least deviation and highest rates of retention
+#boxplots
+for(i in 1:length(df_list)){
+  par(mfrow=c(1,3))
+  boxplot(df_list[[i]][3])
+  boxplot(df_list[[i]][4])
+  boxplot(df_list[[i]][5])
+  title(main=names(df_list[i]))
+  title(sub="Enroll/Grad/Ret")
+}
+#Correlation analysis
+full_corr<-cor(full[sapply(full, is.numeric)],use="pairwise.complete.obs")
+corrplot(full_corr,tl.cex=0.5)
+title(main="Full correlation plot")
+reduced_corr<-cor(complete_col[sapply(complete_col, is.numeric)],use="pairwise.complete.obs")
+corrplot(reduced_corr,tl.cex=0.5)
+title(main="Reduced correlation plot")
+#Demographic data is very highly correlated total enrollment
+#will be left out of analysis unless needed
+#ACF and PACF plots
+pacf(df_list[[1]][4],lag.max=6)
+#No seasonality appears to be present in response variables
+#-----------
+#Inferential Analysis
+
+#Which variables explain variation in enrollment,retention,and graduation?
+#Multiple Linear regression
+#-------
+#Multiple Regression on all - demographic variables not considered
+#response variables not used to predict others
+all_mlm_results<-data.frame(data=character(),response=character(),
+                            score=numeric())
+#--enrollment
+names(complete_col)
+complete_col$year<-as.factor(complete_col$year)#year to factor var
+
+lm<-lm(tot_enroll~.,data=complete_col[,1:21])
+summary(lm)
+summary(step(lm,direction="both",trace=FALSE))
+names(summary(step(lm,direction="both",trace=FALSE)))
+all_mlm_results[nrow(all_mlm_results)+1,]<-c("05_21","tot_enroll",
+            summary(step(lm,direction="both",trace=FALSE))$adj.r.squared)
+#Institution name, year, ft retention, institution size, next year cost, degrees awarded,
+#admission requirements, other staff, education staff
+#Adjusted R-Squared: 0.9917
+#--graduation
+lm<-lm(tot_cohort_grad~.,data=complete_col[,1:21])
+summary(lm)
+summary(step(lm,direction="both",trace=FALSE))
+all_mlm_results[nrow(all_mlm_results)+1,]<-c("05_21","tot_cohort_grad",
+                summary(step(lm,direction="both",trace=FALSE))$adj.r.squared)
+#Institution name,ft_retention, year, next cost, average salary all ranks, degrees awarded,
+#admission test requirements, education staff
+#Adjusted R-Squared: 0.9137
+#--retention
+lm<-lm(ft_retention~.-tot_cohort_grad-tot_enroll,data=complete_col[,1:21])
+summary(lm)
+summary(step(lm,direction="both",trace=FALSE))
+all_mlm_results[nrow(all_mlm_results)+1,]<-c("05_21","ft_retention",
+                  summary(step(lm,direction="both",trace=FALSE))$adj.r.squared)
+#Adjusted R-Squared: 0.8149
+#Institution name, year, graduation, institution size, average salary, admittance rank,
+#admittance test, next cost, other staff
+#Test reduced data set w/ lag var for response
+#Lags 2, 3, and 4 are added for later analysis
+col_red<-complete_col[,1:21]#no demographic var
+col_red <- 
+  col_red %>%
+  group_by(institution.name) %>%
+  mutate(lag.enroll = dplyr::lag(tot_enroll, n = 1, default = NA),
+         lag2.enroll = dplyr::lag(tot_enroll, n = 2, default = NA),
+         lag3.enroll = dplyr::lag(tot_enroll, n = 3, default = NA),
+         lag4.enroll= dplyr::lag(tot_enroll, n = 4, default = NA))
+col_red <- 
+  col_red %>%
+  group_by(institution.name) %>%
+  mutate(lag.grad = dplyr::lag(tot_cohort_grad, n = 1, default = NA),
+         lag2.grad = dplyr::lag(tot_cohort_grad, n = 2, default = NA),
+         lag3.grad = dplyr::lag(tot_cohort_grad, n = 3, default = NA),
+         lag4.grad = dplyr::lag(tot_cohort_grad, n = 4, default = NA))
+col_red <- 
+  col_red %>%
+  group_by(institution.name) %>%
+  mutate(lag.ret = dplyr::lag(ft_retention, n = 1, default = NA),
+         lag2.ret = dplyr::lag(ft_retention, n = 2, default = NA),
+         lag3.ret = dplyr::lag(ft_retention, n = 3, default = NA),
+         lag4.ret = dplyr::lag(ft_retention, n = 4, default = NA))
+names(col_red)
+col_red<-col_red[col_red$year!="2005",]
+col_red$year<-factor(col_red$year)#drop unused factor levels
+lag1_col_red<-col_red[,-which(names(col_red) %in% c("lag2.enroll","lag3.enroll",
+                      "lag4.enroll","lag2.ret","lag3.ret","lag4.ret","lag2.grad",
+                      "lag3.grad","lag4.grad"))]
+
+#--enrollment
+lm<-lm(tot_enroll~.-ft_retention-tot_cohort_grad,data=lag1_col_red)
+summary(lm)
+summary(col_red)
+summary(step(lm,direction="both",trace=FALSE))
+all_mlm_results[nrow(all_mlm_results)+1,]<-c("06_21_lag","tot_enroll",
+              summary(step(lm,direction="both",trace=FALSE))$adj.r.squared)
+#Adjusted R2: 0.9971 using lag.enroll and lag. grad in the model and..
+#institution.name, next cost, average salary all ranks, associate degrees,
+#bachelors degrees, masters degrees, other staff, education staff
+#--graduation
+lm<-lm(tot_cohort_grad~.-ft_retention-tot_enroll,data=lag1_col_red)
+summary(lm)
+summary(step(lm,direction="both",trace=FALSE))
+all_mlm_results[nrow(all_mlm_results)+1,]<-c("06_21_lag","tot_cohort_grad",
+                summary(step(lm,direction="both",trace=FALSE))$adj.r.squared)
+#Adjusted R2: 0.9291 using bachelors degrees, admittance GPA requirements, other staff
+#lags for all response var, and recession
+#--retention
+names(lag1_col_red)
+lm<-lm(ft_retention~.-tot_cohort_grad-tot_enroll,data=lag1_col_red)
+summary(lm)
+summary(step(lm,direction="both",trace=FALSE))
+all_mlm_results[nrow(all_mlm_results)+1,]<-c("06_21_lag","ft_retention",
+                  summary(step(lm,direction="both",trace=FALSE))$adj.r.squared)
+#Adjusted R2: 0.8058 using institution name, year, institution size,
+#previous cost, next cost, avg sal all ranks, admittence tests
+all_mlm_results
+#Loop to create model for each school, for each response of interest
+#creating df list with no NA in columns
+for(i in 1:length(df_list)){
+  df_list[[i]]<-df_list[[i]][ , colSums(is.na(df_list[[i]]))==0]
+}
+results<-data.frame(data=character(),name=character(),tot_enroll=double(),
+                    tot_cohort_grad=double(),ft_retention=double())
+names(df_list[[1]])
+
+#creating list for reduced data sets 
+red_list <- split( lag1_col_red[,-15:-18] , f = col_red$institution.name )
+#removing columns with all same values
+for(i in 1:length(red_list)){
+  temp<-red_list[[i]]
+  temp<-temp[sapply(temp,function(x) !is.factor(x)|length(unique(x))>1)]
+  red_list[[i]]<-temp
+}
+nam<-list()
+tot_enroll<-list()
+tot_cohort_grad<-list()
+ft_retention<-list()
+for(i in 1:length(df_list)){
+  lme<-lm(tot_enroll~.-ft_retention-tot_cohort_grad ,#enrollment model
+          data=df_list[[i]][,-18:-25])
+  tot_enroll[i]<-summary(step(lme,direction="both",trace=FALSE))$adj.r.squared
+  lmg<-lm(tot_cohort_grad~.-ft_retention-tot_enroll,data=df_list[[i]][,-18:-25])#graduation model
+  tot_cohort_grad[i]<-summary(step(lmg,direction="both",trace=FALSE))$adj.r.squared
+  lmr<-lm(ft_retention~.-tot_cohort_grad-tot_enroll,data=df_list[[i]][,-18:-25])#retention model
+  ft_retention[i]<-summary(step(lmr,direction="both",trace=FALSE))$adj.r.squared
+  nam[i]<-names(df_list[i])
+  results[nrow(results)+1,]<-c("05_21",nam[[i]],tot_enroll[[i]],tot_cohort_grad[[i]],
+                               ft_retention[[i]])
+}
+results
+tot_enroll
+#examining red_list with admittance requirements removed
+#as many schools have vastly similar requirements over the years
+for(i in 1:length(red_list)){
+  lme<-lm(tot_enroll~.-year-tot_cohort_grad-ft_retention-doc_degs,data=red_list[[i]])
+  tot_enroll[i]<-summary(step(lme,direction="both",trace=FALSE))$adj.r.squared
+  lmg<-lm(tot_cohort_grad~.-year-tot_enroll-ft_retention-doc_degs,data=red_list[[i]])
+  tot_cohort_grad[i]<-summary(step(lmg,direction="both",trace=FALSE))$adj.r.squared
+  lmr<-lm(ft_retention~.-year-tot_cohort_grad-tot_enroll-doc_degs,data=red_list[[i]])
+  ft_retention[i]<-summary(step(lmr,direction="both",trace=FALSE))$adj.r.squared
+  nam[i]<-names(red_list[i])
+  results[nrow(results)+1,]<-c("06_21_lag",names(red_list[i]),tot_enroll[[i]],tot_cohort_grad[[i]],
+                               ft_retention[[i]])
+}
+
+results
+result_enroll <- results %>% 
+  group_by(name) %>%
+  filter(tot_enroll == max(tot_enroll)) %>%
+  arrange(data,name,tot_enroll)
+result_enroll
+result_enroll %>% as_tibble() %>% filter( tot_enroll == max(tot_enroll) )
+#West Chester max
+result_enroll %>% as_tibble() %>% filter( tot_enroll == min(tot_enroll) )
+#California min
+#lagged data set improves results for Edinboro, Indiana, and Mansfield
+result_grad <- results %>% 
+  group_by(name) %>%
+  filter(tot_cohort_grad == max(tot_cohort_grad)) %>%
+  arrange(data,name,tot_cohort_grad)
+result_grad[,-which(colnames(result_grad)%in% c("tot_enroll","ft_retention"))]
+result_grad %>% as_tibble() %>% filter( tot_cohort_grad == max(tot_cohort_grad) )
+#Lock Haven max
+result_grad %>% as_tibble() %>% filter( tot_cohort_grad == min(tot_cohort_grad) )
+#Mansfield min
+#lagged data set improves results for West Chester
+result_ret <- results %>% 
+  group_by(name) %>%
+  filter(ft_retention == max(ft_retention)) %>%
+  arrange(data,name,ft_retention)
+result_ret[,-which(colnames(result_ret)%in% c("tot_enroll","tot_cohort_grad"))]
+result_ret %>% as_tibble() %>% filter( ft_retention == max(ft_retention) )
+#Kutztown max
+result_ret %>% as_tibble() %>% filter( ft_retention == min(ft_retention) )
+#Lock Haven min
+#lagged data set improves results for Indiana, Lock Haven, Millersville
+#----
+#Can enrollment, graduation, and retention be predicted?
+#Across all
+#--------------------------
+#Univariate methods
+#create result output
+uni_pred_results<-data.frame(method=character(),response=character(),
+                             rmse=numeric(),mae=numeric(),mape=numeric())
+uni_pred_results_per<-data.frame(method=character(),response=character(),
+                                 school=character(),
+                             rmse=numeric(),mae=numeric(),mape=numeric())
+#create train and test sets
+#sort complete_col by year
+complete_col<-complete_col[order(complete_col$year),]
+#changing year back to numeric
+complete_col$year<-as.numeric(complete_col$year)
+size<-as.integer(nrow(complete_col)*.8)
+train<-complete_col[1:size,]
+test<-complete_col[(size+1):nrow(complete_col),]
+test_e<-test[,-3]
+test_g<-test[,-4]
+test_r<-test[,-5]
+names(lag1_col_red)
+#Naive forecasting method -- potentially revisit to run across schools
+#using col_red lag values as these are already calculated
+complete_col<-complete_col[order(complete_col$institution.name),]
+complete_col_06_21<-complete_col[!(complete_col$year==1),]
+pred<-as.data.frame(lag1_col_red[,22:24])
+names(complete_col_06_21)
+for(i in 1:3){
+  r<-RMSE(pred[,i],complete_col_06_21[,2+i])
+  m<-MAE(pred[,i],complete_col_06_21[,2+i])
+  mape_calc<-mean(abs((complete_col_06_21[,2+i]-pred[,i])/
+                        complete_col_06_21[,2+i]))*100
+  uni_pred_results[nrow(uni_pred_results)+1,]<-c("Naive",
+                                                 names(complete_col_06_21[2+i]),
+                                                 r,m,mape_calc)
+}
+
+uni_pred_results
+#Moving Average
+rlist<-list()#to sum rmse over schools
+mlist<-list()#to sum mae over schools
+mapelist<-list()#to average mape over schools
+for(i in 1:14){
+  for(j in 1:3){
+    pred<-ma(df_list[[i]][1+j],2)
+    r<-RMSE(pred,as.ts(df_list[[i]][1+j]),na.rm=TRUE)
+    m<-MAE(pred,as.ts(df_list[[i]][1+j]),na.rm=TRUE)
+    mape_calc<-mean(abs((as.ts(df_list[[i]][1+j])-pred)/
+                          as.ts(df_list[[i]][1+j])),na.rm=TRUE)*100
+    uni_pred_results_per[nrow(uni_pred_results_per)+1,]<-c("MA",names(df_list[[i]][1+j]),
+                                                           names(df_list[i]),
+                                                           r,m,mape_calc)
+  }
+}
+rsum<-list(0,0,0)
+msum<-list(0,0,0)
+mapesum<-list(0,0,0)
+rsum[[1]]
+uni_pred_results_per[,4]<-as.numeric(uni_pred_results_per[,4])
+uni_pred_results_per[,5]<-as.numeric(uni_pred_results_per[,5])
+uni_pred_results_per[,6]<-as.numeric(uni_pred_results_per[,6])
+str(rsum[1])
+for(i in 1:nrow(uni_pred_results_per)){
+  if(uni_pred_results_per[i,2]=="tot_enroll"){
+    rsum[[1]]<-rsum[[1]]+uni_pred_results_per[i,4]
+    msum[[1]]<-msum[[1]]+uni_pred_results_per[i,5]
+    mapesum[[1]]<-mapesum[[1]]+uni_pred_results_per[i,6]
+  } else if(uni_pred_results_per[i,2]=="tot_cohort_grad"){
+    rsum[[2]]<-rsum[[2]]+uni_pred_results_per[i,4]
+    msum[[2]]<-msum[[2]]+uni_pred_results_per[i,5]
+    mapesum[[2]]<-mapesum[[2]]+uni_pred_results_per[i,6]
+  } else{
+    rsum[[3]]<-rsum[[3]]+uni_pred_results_per[i,4]
+    msum[[3]]<-msum[[3]]+uni_pred_results_per[i,5]
+    mapesum[[3]]<-mapesum[[3]]+uni_pred_results_per[i,6]
+  }
+         
+}
+
+uni_pred_results[nrow(uni_pred_results)+1,]<-c("MA",
+                                               "tot_enroll",
+                                               rsum[1],msum[1],mapesum[1])
+uni_pred_results[nrow(uni_pred_results)+1,]<-c("MA",
+                                               "tot_cohort_grad",
+                                               rsum[2],msum[2],mapesum[2])
+uni_pred_results[nrow(uni_pred_results)+1,]<-c("MA",
+                                               "ft_retention",
+                                              rsum[3],msum[3],mapesum[3])
+
+
+
+uni_pred_results
+uni_pred_results_per
+names(df_list[[1]])
+
+#-------------------
+#col_red is used for multivariate analysis
+#as demographic variables will not initially be considered
+#and the data set includes lag variables
+#Multivariate Forecasting
+#Multiple Linear Regression - using lags of response variables
+col_red
+names(col_red)
+col_red<-col_red[order(col_red$year),]#ordering before splitting into train and test
+col_red$year<-as.numeric(col_red$year)
+col_red
+#introducing lag variables introduces NAs, creating specific train sets
+#per lags considered
+#training set will be approx 80% of the timeline, making sure
+#each school is equally represented in the training set
+as.integer(16*.8)
+col_red_train1<-col_red[col_red$year<13,]#train 1 lag, 06-17
+col_red_test1<-col_red[col_red$year>=13,-3:-5] #test 1 lag, 18-21
+col_red_obs1<-col_red[col_red$year>=13,3:5]
+dim(col)
+#lag 2 train set will go from 07-17, which is less than 80%
+#but is chosen over leaving less than 20% for testing
+as.integer(15*.8)
+col_red_train2<-col_red[(col_red$year>1 & col_red$year<13),]#train 2 lag
+col_red_train2<-col_red[-1:-14,]#removing entries with NA in lag 2
+col_red_test2<-col_red[col_red$year>=13,-3:-5] #test 2 lag
+col_red_obs2<-col_red[col_red$year>=13,3:5]
+#lag 3 08-18
+as.integer(14*.8)
+col_red_train3<-col_red[(col_red$year>2 & col_red$year<14),]#train 3 lag
+col_red_train3<-col_red[-1:-28,]#removing entries with NA in lag 3
+col_red_test3<-col_red[col_red$year>=14,-3:-5] #test 3 lag
+col_red_obs3<-col_red[col_red$year>=14,3:5]
+col_red
+#lag 4 09-18
+as.integer(13*.8)
+col_red_train4<-col_red[(col_red$year>3 & col_red$year<14),]#train 3 lag
+col_red_train4<-col_red[-1:-42,]#removing entries with NA in lag 3
+col_red_test4<-col_red[col_red$year>=14,-3:-5] #test 3 lag
+col_red_obs4<-col_red[col_red$year>=14,3:5]
+#----------
+#mlm, only one lag for each response - enrollment
+lme1<-lm(tot_enroll~lag.enroll+lag.ret+lag.grad,data=col_red_train1)
+lme1.fit<-step(lme1,direction="both")
+summary(lme1.fit)
+pred<-predict(lme1.fit,newdata=col_red_test1)
+r<-RMSE(pred,col_red_obs1$tot_enroll)
+m<-MAE(pred,col_red_obs1$tot_enroll)
+mape<-mean(abs((col_red_obs1$tot_enroll-pred)/col_red_obs1$tot_enroll))*100
+mape
+
+#results for multivariate
+multi_pred_results<-data.frame(method=character(),response=character(),
+                               rmse=numeric(),mae=numeric(),mape=numeric())
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag1","tot_enroll",
+                                               r,m,mape)
+#mlm, only one lag for each response - graduation
+lmg1<-lm(tot_cohort_grad~lag.enroll+lag.ret+lag.grad,data=col_red_train1)
+lmg1.fit<-step(lmg1,direction="both")
+pred<-predict(lmg1.fit,newdata=col_red_test1)
+r<-RMSE(pred,col_red_obs1$tot_cohort_grad)
+m<-MAE(pred,col_red_obs1$tot_cohort_grad)
+mape<-mean(abs((col_red_obs1$tot_cohort_grad-pred)/col_red_obs1$tot_cohort_grad))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag1","tot_cohort_grad",
+                                                   r,m,mape)
+#mlm, only one lag for each response - retention
+lmr1<-lm(ft_retention~lag.enroll+lag.ret+lag.grad,data=col_red_train1)
+lmr1.fit<-step(lmr1,direction="both")
+pred<-predict(lmr1.fit,newdata=col_red_test1)
+r<-RMSE(pred,col_red_obs1$ft_retention)
+m<-MAE(pred,col_red_obs1$ft_retention)
+mape<-mean(abs((col_red_obs1$ft_retention-pred)/col_red_obs1$ft_retention))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag1","ft_retention",
+                                                   r,m,mape)
+#---------------------
+#mlm, two lags for each response - enrollment
+lme2<-lm(tot_enroll~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad,data=col_red_train2)
+lme2.fit<-step(lme2,direction="both")
+pred<-predict(lme2.fit,newdata=col_red_test2)
+r<-RMSE(pred,col_red_obs2$tot_enroll)
+m<-MAE(pred,col_red_obs2$tot_enroll)
+mape<-mean(abs((col_red_obs2$tot_enroll-pred)/col_red_obs2$tot_enroll))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag2","tot_enroll",
+                                                   r,m,mape)
+#mlm, two lags for each response - graduation
+lmg2<-lm(tot_cohort_grad~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad,data=col_red_train2)
+lmg2.fit<-step(lmg2,direction="both")
+pred<-predict(lmg2.fit,newdata=col_red_test2)
+r<-RMSE(pred,col_red_obs2$tot_cohort_grad)
+m<-MAE(pred,col_red_obs2$tot_cohort_grad)
+mape<-mean(abs((col_red_obs2$tot_cohort_grad-pred)/col_red_obs2$tot_cohort_grad))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag2","tot_cohort_grad",
+                                                   r,m,mape)
+multi_pred_results
+#mlm, two lags for each response - retention
+lmr2<-lm(ft_retention~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad,data=col_red_train2)
+lmr2.fit<-step(lmr2,direction="both")
+pred<-predict(lmr2.fit,newdata=col_red_test2)
+r<-RMSE(pred,col_red_obs2$ft_retention)
+m<-MAE(pred,col_red_obs2$ft_retention)
+mape<-mean(abs((col_red_obs2$ft_retention-pred)/col_red_obs2$ft_retention))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag2","ft_retention",
+                                                   r,m,mape)
+#---------------------
+#mlm, three lags for each response - enrollment
+lme3<-lm(tot_enroll~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad+lag3.enroll+lag3.ret+lag3.grad,data=col_red_train3)
+lme3.fit<-step(lme3,direction="both")
+pred<-predict(lme3.fit,newdata=col_red_test3)
+r<-RMSE(pred,col_red_obs3$tot_enroll)
+m<-MAE(pred,col_red_obs3$tot_enroll)
+mape<-mean(abs((col_red_obs3$tot_enroll-pred)/col_red_obs3$tot_enroll))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag3","tot_enroll",
+                                                   r,m,mape)
+multi_pred_results
+#mlm, three lags for each response - graduation
+lmg3<-lm(tot_cohort_grad~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad+lag3.enroll+lag3.ret+lag3.grad,data=col_red_train3)
+lmg3.fit<-step(lmg3,direction="both")
+pred<-predict(lmg3.fit,newdata=col_red_test3)
+r<-RMSE(pred,col_red_obs3$tot_cohort_grad)
+m<-MAE(pred,col_red_obs3$tot_cohort_grad)
+mape<-mean(abs((col_red_obs3$tot_cohort_grad-pred)/col_red_obs3$tot_cohort_grad))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag3","tot_cohort_grad",
+                                                   r,m,mape)
+multi_pred_results
+#mlm, three lags for each response - retention
+lmr3<-lm(ft_retention~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad+lag3.enroll+lag3.ret+lag3.grad,data=col_red_train3)
+lmr3.fit<-step(lmr3,direction="both")
+pred<-predict(lmr3.fit,newdata=col_red_test3)
+r<-RMSE(pred,col_red_obs3$ft_retention)
+m<-MAE(pred,col_red_obs3$ft_retention)
+mape<-mean(abs((col_red_obs3$ft_retention-pred)/col_red_obs3$ft_retention))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag3","ft_retention",
+                                                   r,m,mape)
+#---------------------
+#mlm, four lags for each response - enrollment
+lme4<-lm(tot_enroll~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad+lag3.enroll+lag3.ret+lag3.grad+
+           lag4.enroll+lag4.ret+lag4.grad,data=col_red_train4)
+lme4.fit<-step(lme4,direction="both")
+pred<-predict(lme4.fit,newdata=col_red_test4)
+r<-RMSE(pred,col_red_obs4$tot_enroll)
+m<-MAE(pred,col_red_obs4$tot_enroll)
+mape<-mean(abs((col_red_obs4$tot_enroll-pred)/col_red_obs4$tot_enroll))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag4","tot_enroll",
+                                                   r,m,mape)
+multi_pred_results
+#mlm, four lags for each response - graduation
+lmg4<-lm(tot_cohort_grad~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad+lag3.enroll+lag3.ret+lag3.grad+
+           lag4.enroll+lag4.ret+lag4.grad,data=col_red_train4)
+lmg4.fit<-step(lmg4,direction="both")
+pred<-predict(lmg4.fit,newdata=col_red_test4)
+r<-RMSE(pred,col_red_obs4$tot_cohort_grad)
+m<-MAE(pred,col_red_obs4$tot_cohort_grad)
+mape<-mean(abs((col_red_obs4$tot_cohort_grad-pred)/col_red_obs4$tot_cohort_grad))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag4","tot_cohort_grad",
+                                                   r,m,mape)
+multi_pred_results
+#mlm, four lags for each response - retention
+lmr4<-lm(ft_retention~lag.enroll+lag2.enroll+lag.ret+lag2.ret+
+           lag2.grad+lag.grad+lag3.enroll+lag3.ret+lag3.grad+
+           lag4.enroll+lag4.ret+lag4.grad,data=col_red_train4)
+lmr4.fit<-step(lmr4,direction="both")
+pred<-predict(lmr4.fit,newdata=col_red_test4)
+r<-RMSE(pred,col_red_obs4$ft_retention)
+m<-MAE(pred,col_red_obs4$ft_retention)
+mape<-mean(abs((col_red_obs4$ft_retention-pred)/col_red_obs4$ft_retention))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag4","ft_retention",
+                                                   r,m,mape)
+#tot_cohort_grad and tot_enroll predicted slightly better by lag3 model
+#ft_retention predicted best by lag3 model
+#-----------
+#Multiple Linear Regression - considering all but lag.4 vars
+#mlm- enrollment
+names(col_red_train3)
+names(col_red_test3)
+col_red_train3<-col_red_train3[,-33]
+col_red_train3<-col_red_train3[,-29]
+col_red_train3<-col_red_train3[,-25]
+col_red_test3<-col_red_test3[,-30]
+col_red_test3<-col_red_test3[,-26]
+col_red_test3<-col_red_test3[,-22]
+#admit tests dropped, lead to singularities
+lme3<-lm(tot_enroll~.-tot_cohort_grad-ft_retention-admit_tests,data=col_red_train3)
+lme3.fit<-step(lme3,direction="both")
+summary(lme3.fit)
+lme3.fit
+pred<-predict(lme3.fit,newdata=col_red_test3)
+r<-RMSE(pred,col_red_obs3$tot_enroll)
+m<-MAE(pred,col_red_obs3$tot_enroll)
+mape<-mean(abs((col_red_obs3$tot_enroll-pred)/col_red_obs3$tot_enroll))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag3all","tot_enroll",
+                                                   r,m,mape)
+multi_pred_results
+#mlm - graduation
+lmg3<-lm(tot_cohort_grad~.-tot_enroll-ft_retention-admit_tests,data=col_red_train3)
+lmg3.fit<-step(lmg3,direction="both")
+summary(lmg3.fit)
+pred<-predict(lmg3.fit,newdata=col_red_test3)
+r<-RMSE(pred,col_red_obs3$tot_cohort_grad)
+m<-MAE(pred,col_red_obs3$tot_cohort_grad)
+mape<-mean(abs((col_red_obs3$tot_cohort_grad-pred)/col_red_obs3$tot_cohort_grad))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag3all","tot_cohort_grad",
+                                                   r,m,mape)
+multi_pred_results
+#mlm- retention
+lmr3<-lm(ft_retention~.-tot_enroll-tot_cohort_grad-admit_tests,data=col_red_train3)
+lmr3.fit<-step(lmr3,direction="both")
+summary(lmr3.fit)
+pred<-predict(lmr3.fit,newdata=col_red_test3)
+r<-RMSE(pred,col_red_obs3$ft_retention)
+m<-MAE(pred,col_red_obs3$ft_retention)
+mape<-mean(abs((col_red_obs3$ft_retention-pred)/col_red_obs3$ft_retention))*100
+
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Mlm_lag3all","ft_retention",
+                                                   r,m,mape)
+multi_pred_results
+#Model increases score across all considered
+#-----------------
+#Ridge Regression -- need input as matrices
+col_red_train3<-as.data.frame(col_red_train3)
+col_red_test3<-as.data.frame(col_red_test3)
+#Make certain columns numeric - not factor**************
+col_red_train3$recession <- as.numeric(col_red_train3$recession)
+col_red_train3$institution.name<- as.numeric(col_red_train3$institution.name)
+col_red_train3$institution_size<- as.numeric(col_red_train3$institution_size)
+col_red_train3<-col_red_train3[,-15:-18]#remove admittance requirements
+col_red_test3$recession <- as.numeric(col_red_test3$recession)
+col_red_test3$institution.name<- as.numeric(col_red_test3$institution.name)
+col_red_test3$institution_size<- as.numeric(col_red_test3$institution_size)
+col_red_test3<-col_red_test3[,-12:-15]#remove admittance requirements
+x<-col_red_train3[,-which(colnames(col_red_train3) %in%
+                            c("tot_enroll","tot_cohort_grad","ft_retention"))]
+names(col_red_test3)
+names(col_red_train3)
+x_test<-col_red_test3
+x_test
+dim(x)
+y_e<-col_red_train3$tot_enroll
+y_g<-col_red_train3$tot_cohort_grad
+y_r<-col_red_train3$ft_retention
+#Ridge regression model- enrollment
+model_e<-glmnet(as.matrix(x),as.matrix(y_e),alpha=0)
+summary(model_e)
+cv_modele<-cv.glmnet(as.matrix(x),as.matrix(y_e),alpha=0)
+best_lambda<-cv_modele$lambda.min
+best_lambda
+plot(cv_modele)
+model_e<-glmnet(as.matrix(x),as.matrix(y_e),alpha=0,lambda=best_lambda)
+coef(model_e)
+y_pred<-predict(model_e,newx=as.matrix(x_test))
+r<-RMSE(y_pred,as.matrix(col_red_obs3[,1]))
+m<-MAE(y_pred,as.matrix(col_red_obs3[,1]))
+mape<-mean(abs((col_red_obs3$tot_enroll-y_pred)/col_red_obs3$tot_enroll))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Ridge","tot_enroll",
+                                                   r,m,mape)
+multi_pred_results
+#Ridge Regression model - graduation
+model_g<-glmnet(as.matrix(x),as.matrix(y_g),alpha=0)
+summary(model_g)
+cv_modelg<-cv.glmnet(as.matrix(x),as.matrix(y_g),alpha=0)
+best_lambda<-cv_modelg$lambda.min
+best_lambda
+plot(cv_modelg)
+model_g<-glmnet(as.matrix(x),as.matrix(y_g),alpha=0,lambda=best_lambda)
+coef(model_g)
+y_pred<-predict(model_g,newx=as.matrix(x_test))
+r<-RMSE(y_pred,as.matrix(col_red_obs3[,2]))
+m<-MAE(y_pred,as.matrix(col_red_obs3[,2]))
+mape<-mean(abs((col_red_obs3$tot_cohort_grad-y_pred)/col_red_obs3$tot_cohort_grad))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Ridge","tot_cohort_grad",
+                                                   r,m,mape)
+#Ridge Regression model - retention
+model_r<-glmnet(as.matrix(x),as.matrix(y_r),alpha=0)
+summary(model_r)
+cv_modelr<-cv.glmnet(as.matrix(x),as.matrix(y_r),alpha=0)
+best_lambda<-cv_modelr$lambda.min
+best_lambda
+plot(cv_modelr)
+model_r<-glmnet(as.matrix(x),as.matrix(y_r),alpha=0,lambda=best_lambda)
+coef(model_r)
+y_pred<-predict(model_r,newx=as.matrix(x_test))
+r<-RMSE(y_pred,as.matrix(col_red_obs3[,3]))
+m<-MAE(y_pred,as.matrix(col_red_obs3[,3]))
+mape<-mean(abs((col_red_obs3$ft_retention-y_pred)/col_red_obs3$ft_retention))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Ridge","ft_retention",
+                                                   r,m,mape)
+#---------------------------------
+#Lasso Regression model - enrollment
+model_e<-glmnet(as.matrix(x),as.matrix(y_e),alpha=1)
+summary(model_e)
+cv_modele<-cv.glmnet(as.matrix(x),as.matrix(y_e),alpha=1)
+best_lambda<-cv_modele$lambda.min
+best_lambda
+plot(cv_modele)
+model_e<-glmnet(as.matrix(x),as.matrix(y_e),alpha=1,lambda=best_lambda)
+coef(model_e)
+y_pred<-predict(model_e,newx=as.matrix(x_test))
+r<-RMSE(y_pred,as.matrix(col_red_obs3[,1]))
+m<-MAE(y_pred,as.matrix(col_red_obs3[,1]))
+mape<-mean(abs((col_red_obs3$tot_enroll-y_pred)/col_red_obs3$tot_enroll))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Lasso","tot_enroll",
+                                                   r,m,mape)
+multi_pred_results
+#Lasso Regression model - graduation
+model_g<-glmnet(as.matrix(x),as.matrix(y_g),alpha=1)
+summary(model_g)
+cv_modelg<-cv.glmnet(as.matrix(x),as.matrix(y_g),alpha=1)
+best_lambda<-cv_modelg$lambda.min
+best_lambda
+plot(cv_modelg)
+model_g<-glmnet(as.matrix(x),as.matrix(y_g),alpha=1,lambda=best_lambda)
+coef(model_g)
+y_pred<-predict(model_g,newx=as.matrix(x_test))
+r<-RMSE(y_pred,as.matrix(col_red_obs3[,2]))
+m<-MAE(y_pred,as.matrix(col_red_obs3[,2]))
+mape<-mean(abs((col_red_obs3$tot_cohort_grad-y_pred)/col_red_obs3$tot_cohort_grad))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Lasso","tot_cohort_grad",
+                                                   r,m,mape)
+#Lasso Regression model - retention
+model_r<-glmnet(as.matrix(x),as.matrix(y_r),alpha=1)
+summary(model_r)
+cv_modelr<-cv.glmnet(as.matrix(x),as.matrix(y_r),alpha=1)
+best_lambda<-cv_modelr$lambda.min
+best_lambda
+plot(cv_modelr)
+model_r<-glmnet(as.matrix(x),as.matrix(y_r),alpha=1,lambda=best_lambda)
+coef(model_r)
+y_pred<-predict(model_r,newx=as.matrix(x_test))
+r<-RMSE(y_pred,as.matrix(col_red_obs3[,3]))
+m<-MAE(y_pred,as.matrix(col_red_obs3[,3]))
+mape<-mean(abs((col_red_obs3$ft_retention-y_pred)/col_red_obs3$ft_retention))*100
+mape
+multi_pred_results[nrow(multi_pred_results)+1,]<-c("Lasso","ft_retention",
+                                                   r,m,mape)
+multi_pred_results
+write.csv(multi_pred_results,"output.csv")
